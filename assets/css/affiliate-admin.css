@@ -1,0 +1,26 @@
+/* Affiliate MLM Pro — Admin Styles */
+.affiliate-mlm-admin h1 { margin-bottom: 1.5rem; }
+.amlm-stat-cards {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    margin-bottom: 2rem;
+}
+.amlm-card {
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 1.2rem 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: .25rem;
+    min-width: 160px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.06);
+}
+.amlm-num { font-size: 2rem; font-weight: 700; color: #1e293b; }
+.amlm-label { font-size: .8rem; color: #64748b; }
+
+.amlm-status-pending  { color: #d97706; font-weight: 600; }
+.amlm-status-approved { color: #16a34a; font-weight: 600; }
+.amlm-status-rejected { color: #dc2626; font-weight: 600; }
+.amlm-status-paid     { color: #2563eb; font-weight: 600; }
