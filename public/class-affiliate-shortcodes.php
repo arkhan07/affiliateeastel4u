@@ -26,7 +26,13 @@ class Affiliate_MLM_Shortcodes {
 
     public function render_register( $atts ) {
         if ( is_user_logged_in() ) {
-            return '<p>' . esc_html__( 'Anda sudah log masuk.', 'affiliate-mlm-pro' ) . ' <a href="' . esc_url( get_permalink( get_option('affiliate_dashboard_page') ?: '' ) ?: home_url('/dashboard/') ) . '">' . esc_html__( 'Dashboard', 'affiliate-mlm-pro' ) . '</a></p>';
+            $dashboard_url = get_option('affiliate_dashboard_page')
+                ? get_permalink( get_option('affiliate_dashboard_page') )
+                : home_url('/affiliate-dashboard/');
+            return '<div class="amlm-already-logged-in">
+                <p>✅ ' . esc_html__( 'Anda sudah log masuk.', 'affiliate-mlm-pro' ) . '
+                <a href="' . esc_url( $dashboard_url ) . '">' . esc_html__( 'Pergi ke Dashboard →', 'affiliate-mlm-pro' ) . '</a></p>
+            </div>';
         }
         ob_start();
         include AFFILIATE_MLM_PLUGIN_DIR . 'templates/register-form.php';
@@ -35,12 +41,73 @@ class Affiliate_MLM_Shortcodes {
 
     public function render_dashboard( $atts ) {
         if ( ! is_user_logged_in() ) {
-            return '<p>' . esc_html__( 'Sila log masuk untuk melihat dashboard.', 'affiliate-mlm-pro' ) . ' <a href="' . esc_url( wp_login_url( get_permalink() ) ) . '">' . esc_html__( 'Log Masuk', 'affiliate-mlm-pro' ) . '</a></p>';
+            // Redirect to login
+            $login_url = wp_login_url( get_permalink() );
+            ob_start();
+            ?>
+            <div class="amlm-access-denied">
+                <div class="amlm-access-icon">🔒</div>
+                <h2><?php esc_html_e( 'Akses Dikehendaki Log Masuk', 'affiliate-mlm-pro' ); ?></h2>
+                <p><?php esc_html_e( 'Sila log masuk untuk melihat dashboard affiliate anda.', 'affiliate-mlm-pro' ); ?></p>
+                <a href="<?php echo esc_url( $login_url ); ?>" class="amlm-btn-login">
+                    <?php esc_html_e( '🔑 Log Masuk Sekarang', 'affiliate-mlm-pro' ); ?>
+                </a>
+            </div>
+            <script>
+            // Auto redirect after 1.5 seconds
+            setTimeout(function(){
+                window.location.href = '<?php echo esc_js( $login_url ); ?>';
+            }, 2000);
+            </script>
+            <?php
+            return ob_get_clean();
         }
+
         $affiliate = Affiliate_MLM_Core::get_current_affiliate();
+
+        // ─── Fallback: Jika record tidak wujud, cuba create ────────────
         if ( ! $affiliate ) {
-            return '<p>' . esc_html__( 'Akaun affiliate tidak dijumpai.', 'affiliate-mlm-pro' ) . '</p>';
+            $user_id = get_current_user_id();
+            $user    = get_userdata( $user_id );
+            if ( $user ) {
+                global $wpdb;
+                $affiliate_slug = sanitize_user( $user->user_login, true );
+                $existing = $wpdb->get_var( $wpdb->prepare(
+                    "SELECT COUNT(*) FROM {$wpdb->prefix}affiliates WHERE affiliate_slug = %s",
+                    $affiliate_slug
+                ) );
+                if ( $existing ) {
+                    $affiliate_slug = $affiliate_slug . '_' . $user_id;
+                }
+                $wpdb->insert(
+                    $wpdb->prefix . 'affiliates',
+                    [
+                        'user_id'        => $user_id,
+                        'sponsor_id'     => null,
+                        'affiliate_slug' => $affiliate_slug,
+                        'status'         => 'active',
+                        'joined_at'      => current_time( 'mysql' ),
+                    ],
+                    [ '%d', '%d', '%s', '%s', '%s' ]
+                );
+                // Assign role
+                $user_obj = new WP_User( $user_id );
+                if ( ! in_array( 'affiliate', (array) $user_obj->roles ) ) {
+                    $user_obj->add_role( 'affiliate' );
+                }
+                // Re-fetch
+                $affiliate = Affiliate_MLM_Core::get_current_affiliate();
+            }
         }
+
+        if ( ! $affiliate ) {
+            return '<div class="amlm-access-denied">
+                <div class="amlm-access-icon">⚠️</div>
+                <h2>' . esc_html__( 'Akaun Affiliate Tidak Dijumpai', 'affiliate-mlm-pro' ) . '</h2>
+                <p>' . esc_html__( 'Sila hubungi admin untuk bantuan.', 'affiliate-mlm-pro' ) . '</p>
+            </div>';
+        }
+
         ob_start();
         include AFFILIATE_MLM_PLUGIN_DIR . 'templates/dashboard.php';
         return ob_get_clean();
@@ -111,21 +178,11 @@ class Affiliate_MLM_Shortcodes {
         return ob_get_clean();
     }
 
-    /**
-     * [affiliate_bantuan_penaja] — Display sponsor/penaja contact info box.
-     *
-     * Usage:
-     *   [affiliate_bantuan_penaja]            — shows sponsor of logged-in user
-     *   [affiliate_bantuan_penaja ref="slug"] — shows sponsor based on ref slug
-     *
-     * If no affiliate / no ref: defaults to admin.
-     */
     public function render_bantuan_penaja( $atts ) {
         $atts = shortcode_atts( [ 'ref' => '' ], $atts );
 
         $sponsor = null;
 
-        // 1. If logged in, use their actual sponsor
         if ( is_user_logged_in() ) {
             $affiliate = Affiliate_MLM_Core::get_current_affiliate();
             if ( $affiliate ) {
@@ -133,7 +190,6 @@ class Affiliate_MLM_Shortcodes {
             }
         }
 
-        // 2. If ref attribute provided, resolve from that affiliate
         if ( ! $sponsor && ! empty( $atts['ref'] ) ) {
             $ref_aff = Affiliate_MLM_Core::get_affiliate_by_slug( sanitize_text_field( $atts['ref'] ) );
             if ( $ref_aff ) {
@@ -146,7 +202,6 @@ class Affiliate_MLM_Shortcodes {
             }
         }
 
-        // 3. Try cookie/URL ref
         if ( ! $sponsor ) {
             $ref_slug = '';
             if ( ! empty( $_COOKIE['affiliate_ref'] ) ) {
@@ -167,7 +222,6 @@ class Affiliate_MLM_Shortcodes {
             }
         }
 
-        // 4. Default: admin
         if ( ! $sponsor ) {
             $admins   = get_users( [ 'role' => 'administrator', 'number' => 1 ] );
             $adm      = ! empty( $admins ) ? $admins[0] : get_userdata(1);

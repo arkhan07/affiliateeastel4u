@@ -132,14 +132,6 @@ class Affiliate_MLM_Tracking {
 
         // Clear cookie
         setcookie( 'affiliate_ref', '', time() - 3600, COOKIEPATH, COOKIE_DOMAIN );
-
-        // Welcome email
-        self::send_welcome_email( $user_id );
-
-        // Notify sponsor
-        if ( $sponsor_id ) {
-            self::send_sponsor_notification( $sponsor->user_id, $user->display_name );
-        }
     }
 
     /**
@@ -217,7 +209,7 @@ class Affiliate_MLM_Tracking {
             wp_send_json_error( [ 'errors' => $errors ] );
         }
 
-        // Create user
+        // Create user — this fires on_user_register hook automatically
         $user_id = wp_create_user( $username, $password, $email );
         if ( is_wp_error( $user_id ) ) {
             wp_send_json_error( [ 'message' => $user_id->get_error_message() ] );
@@ -245,14 +237,37 @@ class Affiliate_MLM_Tracking {
             [ '%d' ]
         );
 
+        // ─── Auto-login user selepas register ─────────────────────────
+        // This is critical so that get_current_affiliate() works immediately on redirect
+        wp_set_current_user( $user_id );
+        wp_set_auth_cookie( $user_id, true );
+
         delete_transient( $cap_key );
+
+        // Send welcome email with HTML template
+        self::send_welcome_email( $user_id, $phone, $negeri, $negara );
+
+        // Notify sponsor
+        $sponsor_slug = ! empty( $aff_ref ) ? $aff_ref : '';
+        if ( empty( $sponsor_slug ) && ! empty( $_COOKIE['affiliate_ref'] ) ) {
+            $sponsor_slug = sanitize_text_field( wp_unslash( $_COOKIE['affiliate_ref'] ) );
+        }
+        if ( $sponsor_slug ) {
+            $sponsor = Affiliate_MLM_Core::get_affiliate_by_slug( $sponsor_slug );
+            if ( $sponsor ) {
+                self::send_sponsor_notification( $sponsor->user_id, $nama );
+            }
+        }
+
+        // Notify admin
+        self::send_admin_notification( $nama, $email, $phone, $negeri, $negara );
 
         $redirect = get_option( 'affiliate_dashboard_page' )
             ? get_permalink( get_option( 'affiliate_dashboard_page' ) )
             : home_url( '/affiliate-dashboard/' );
 
         wp_send_json_success( [
-            'message'  => esc_html__( 'Pendaftaran berjaya! Mengalihkan...', 'affiliate-mlm-pro' ),
+            'message'  => esc_html__( 'Pendaftaran berjaya! Mengalihkan ke dashboard...', 'affiliate-mlm-pro' ),
             'redirect' => $redirect,
         ] );
     }
@@ -344,27 +359,208 @@ class Affiliate_MLM_Tracking {
         return '0.0.0.0';
     }
 
-    private static function send_welcome_email( $user_id ) {
-        $user    = get_userdata( $user_id );
-        $subject = sprintf( __( 'Selamat Datang ke %s - Akaun Affiliate Anda', 'affiliate-mlm-pro' ), get_bloginfo( 'name' ) );
-        $message = sprintf(
-            __( "Salam %s,\n\nTerima kasih kerana mendaftar sebagai affiliate kami.\n\nLog masuk ke dashboard anda untuk mendapatkan link affiliate anda.\n\nSalam,\n%s", 'affiliate-mlm-pro' ),
-            esc_html( $user->display_name ),
-            get_bloginfo( 'name' )
-        );
-        wp_mail( $user->user_email, $subject, $message );
+    /**
+     * Send HTML welcome email to new affiliate.
+     */
+    private static function send_welcome_email( $user_id, $phone = '', $negeri = '', $negara = '' ) {
+        $user        = get_userdata( $user_id );
+        $site_name   = get_bloginfo( 'name' );
+        $site_url    = home_url();
+        $dashboard   = get_option( 'affiliate_dashboard_page' )
+                        ? get_permalink( get_option( 'affiliate_dashboard_page' ) )
+                        : home_url( '/affiliate-dashboard/' );
+
+        // Get affiliate slug
+        $affiliate   = Affiliate_MLM_Core::get_affiliate_by_user( $user_id );
+        $aff_link    = $affiliate ? add_query_arg( 'ref', $affiliate->affiliate_slug, home_url() ) : '';
+        $aff_slug    = $affiliate ? $affiliate->affiliate_slug : '';
+
+        $subject = sprintf( __( '🎉 Selamat Datang ke %s – Akaun Affiliate Anda Berjaya Didaftarkan!', 'affiliate-mlm-pro' ), $site_name );
+
+        $message = self::get_welcome_email_html( $user->display_name, $site_name, $site_url, $dashboard, $aff_link, $aff_slug );
+
+        $headers = [
+            'Content-Type: text/html; charset=UTF-8',
+            'From: ' . $site_name . ' <' . get_option( 'admin_email' ) . '>',
+        ];
+
+        wp_mail( $user->user_email, $subject, $message, $headers );
     }
 
+    /**
+     * Send HTML notification email to sponsor.
+     */
     private static function send_sponsor_notification( $sponsor_user_id, $new_member_name ) {
-        $sponsor = get_userdata( $sponsor_user_id );
+        $sponsor   = get_userdata( $sponsor_user_id );
         if ( ! $sponsor ) return;
-        $subject = sprintf( __( 'Member Baru Bergabung - %s', 'affiliate-mlm-pro' ), get_bloginfo( 'name' ) );
-        $message = sprintf(
-            __( "Salam %s,\n\nAhli baru telah mendaftar melalui link affiliate anda: %s\n\nSalam,\n%s", 'affiliate-mlm-pro' ),
-            esc_html( $sponsor->display_name ),
-            esc_html( $new_member_name ),
-            get_bloginfo( 'name' )
-        );
-        wp_mail( $sponsor->user_email, $subject, $message );
+
+        $site_name = get_bloginfo( 'name' );
+        $dashboard = get_option( 'affiliate_dashboard_page' )
+                        ? get_permalink( get_option( 'affiliate_dashboard_page' ) )
+                        : home_url( '/affiliate-dashboard/' );
+
+        $subject = sprintf( __( '🎊 Ahli Baru Bergabung Melalui Link Anda – %s', 'affiliate-mlm-pro' ), $site_name );
+
+        $message = self::get_sponsor_notification_html( $sponsor->display_name, $new_member_name, $site_name, $dashboard );
+
+        $headers = [
+            'Content-Type: text/html; charset=UTF-8',
+            'From: ' . $site_name . ' <' . get_option( 'admin_email' ) . '>',
+        ];
+
+        wp_mail( $sponsor->user_email, $subject, $message, $headers );
+    }
+
+    /**
+     * Send admin notification on new registration.
+     */
+    private static function send_admin_notification( $nama, $email, $phone, $negeri, $negara ) {
+        $site_name  = get_bloginfo( 'name' );
+        $admin_email = get_option( 'admin_email' );
+        $admin_url  = admin_url( 'admin.php?page=affiliate-mlm-members' );
+
+        $subject = sprintf( __( '🆕 Ahli Affiliate Baru: %s', 'affiliate-mlm-pro' ), $nama );
+
+        $message = '<!DOCTYPE html><html><head><meta charset="UTF-8"></head><body style="font-family:Arial,sans-serif;background:#f4f4f4;margin:0;padding:20px;">
+<div style="max-width:560px;margin:0 auto;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 2px 10px rgba(0,0,0,0.1);">
+  <div style="background:linear-gradient(135deg,#1e2328,#2c3138);padding:30px;text-align:center;">
+    <h2 style="color:#e8a020;margin:0;font-size:22px;">🆕 Ahli Affiliate Baru</h2>
+    <p style="color:#9aa0a9;margin:5px 0 0;font-size:14px;">' . esc_html( $site_name ) . '</p>
+  </div>
+  <div style="padding:30px;">
+    <table style="width:100%;border-collapse:collapse;">
+      <tr><td style="padding:10px;border-bottom:1px solid #eee;color:#666;width:120px;font-weight:bold;">Nama</td><td style="padding:10px;border-bottom:1px solid #eee;">' . esc_html( $nama ) . '</td></tr>
+      <tr><td style="padding:10px;border-bottom:1px solid #eee;color:#666;font-weight:bold;">Email</td><td style="padding:10px;border-bottom:1px solid #eee;">' . esc_html( $email ) . '</td></tr>
+      <tr><td style="padding:10px;border-bottom:1px solid #eee;color:#666;font-weight:bold;">Phone</td><td style="padding:10px;border-bottom:1px solid #eee;">' . esc_html( $phone ) . '</td></tr>
+      <tr><td style="padding:10px;border-bottom:1px solid #eee;color:#666;font-weight:bold;">Negeri</td><td style="padding:10px;border-bottom:1px solid #eee;">' . esc_html( $negeri ) . '</td></tr>
+      <tr><td style="padding:10px;color:#666;font-weight:bold;">Negara</td><td style="padding:10px;">' . esc_html( $negara ) . '</td></tr>
+    </table>
+    <div style="text-align:center;margin-top:25px;">
+      <a href="' . esc_url( $admin_url ) . '" style="display:inline-block;padding:12px 30px;background:#e8a020;color:#1e2328;border-radius:6px;text-decoration:none;font-weight:bold;">Lihat di Admin Panel</a>
+    </div>
+  </div>
+</div></body></html>';
+
+        $headers = [
+            'Content-Type: text/html; charset=UTF-8',
+            'From: ' . $site_name . ' <' . $admin_email . '>',
+        ];
+
+        wp_mail( $admin_email, $subject, $message, $headers );
+    }
+
+    /**
+     * Build welcome email HTML.
+     */
+    private static function get_welcome_email_html( $name, $site_name, $site_url, $dashboard_url, $aff_link, $aff_slug ) {
+        return '<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
+<body style="font-family:Arial,sans-serif;background:#f0f4f8;margin:0;padding:20px;">
+<div style="max-width:600px;margin:0 auto;">
+
+  <!-- Header -->
+  <div style="background:linear-gradient(135deg,#7c3aed,#4f46e5);border-radius:16px 16px 0 0;padding:40px 30px;text-align:center;">
+    <div style="font-size:48px;margin-bottom:10px;">🎉</div>
+    <h1 style="color:#fff;margin:0;font-size:26px;font-weight:700;">Selamat Datang!</h1>
+    <p style="color:rgba(255,255,255,0.85);margin:8px 0 0;font-size:15px;">Akaun Affiliate Anda Berjaya Didaftarkan</p>
+  </div>
+
+  <!-- Body -->
+  <div style="background:#fff;padding:35px 30px;">
+    <p style="font-size:16px;color:#333;margin-top:0;">Salam <strong style="color:#7c3aed;">' . esc_html( $name ) . '</strong>,</p>
+    <p style="font-size:15px;color:#555;line-height:1.7;">Terima kasih kerana mendaftar sebagai Ahli Affiliate <strong>' . esc_html( $site_name ) . '</strong>. Akaun anda telah berjaya diwujudkan dan anda sudah boleh mula berkongsi link affiliate anda!</p>
+
+    <!-- Stats Box -->
+    <div style="background:linear-gradient(135deg,#f5f3ff,#ede9fe);border:1px solid #ddd6fe;border-radius:12px;padding:20px;margin:25px 0;">
+      <p style="margin:0 0 5px;font-size:13px;color:#7c3aed;font-weight:700;text-transform:uppercase;letter-spacing:1px;">📎 Link Affiliate Anda</p>
+      <p style="margin:0;font-size:14px;color:#4c1d95;word-break:break-all;font-family:monospace;background:#fff;padding:10px;border-radius:8px;border:1px dashed #c4b5fd;">' . esc_html( $aff_link ) . '</p>
+    </div>
+
+    <!-- Steps -->
+    <h3 style="color:#333;font-size:16px;margin-bottom:15px;">🚀 Langkah Seterusnya:</h3>
+    <div style="display:flex;flex-direction:column;gap:12px;">
+      <div style="display:flex;align-items:flex-start;gap:12px;padding:12px;background:#fafafa;border-radius:8px;border-left:3px solid #7c3aed;">
+        <span style="font-size:20px;">1️⃣</span>
+        <div>
+          <strong style="color:#333;font-size:14px;">Log masuk ke Dashboard</strong><br>
+          <span style="color:#666;font-size:13px;">Lihat statistik, komisen, dan downline anda</span>
+        </div>
+      </div>
+      <div style="display:flex;align-items:flex-start;gap:12px;padding:12px;background:#fafafa;border-radius:8px;border-left:3px solid #10b981;">
+        <span style="font-size:20px;">2️⃣</span>
+        <div>
+          <strong style="color:#333;font-size:14px;">Kongsikan Link Affiliate Anda</strong><br>
+          <span style="color:#666;font-size:13px;">Kongsi kepada rakan, keluarga, dan media sosial</span>
+        </div>
+      </div>
+      <div style="display:flex;align-items:flex-start;gap:12px;padding:12px;background:#fafafa;border-radius:8px;border-left:3px solid #f59e0b;">
+        <span style="font-size:20px;">3️⃣</span>
+        <div>
+          <strong style="color:#333;font-size:14px;">Dapatkan Komisen</strong><br>
+          <span style="color:#666;font-size:13px;">Setiap rujukan yang berjaya akan memberikan komisen kepada anda</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- CTA Button -->
+    <div style="text-align:center;margin-top:30px;">
+      <a href="' . esc_url( $dashboard_url ) . '" style="display:inline-block;padding:14px 40px;background:linear-gradient(135deg,#7c3aed,#4f46e5);color:#fff;border-radius:50px;text-decoration:none;font-weight:700;font-size:16px;box-shadow:0 4px 15px rgba(124,58,237,0.4);">
+        🚀 Pergi ke Dashboard Saya
+      </a>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <div style="background:#1e2328;border-radius:0 0 16px 16px;padding:20px 30px;text-align:center;">
+    <p style="color:#9aa0a9;margin:0;font-size:13px;">© ' . date('Y') . ' ' . esc_html( $site_name ) . ' | <a href="' . esc_url( $site_url ) . '" style="color:#7c3aed;text-decoration:none;">Lawati Laman Web</a></p>
+  </div>
+</div>
+</body>
+</html>';
+    }
+
+    /**
+     * Build sponsor notification email HTML.
+     */
+    private static function get_sponsor_notification_html( $sponsor_name, $new_member_name, $site_name, $dashboard_url ) {
+        return '<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="font-family:Arial,sans-serif;background:#f0f4f8;margin:0;padding:20px;">
+<div style="max-width:560px;margin:0 auto;">
+
+  <!-- Header -->
+  <div style="background:linear-gradient(135deg,#059669,#10b981);border-radius:16px 16px 0 0;padding:35px 30px;text-align:center;">
+    <div style="font-size:44px;margin-bottom:8px;">🎊</div>
+    <h1 style="color:#fff;margin:0;font-size:24px;font-weight:700;">Ahli Baru Bergabung!</h1>
+  </div>
+
+  <!-- Body -->
+  <div style="background:#fff;padding:30px;">
+    <p style="font-size:16px;color:#333;margin-top:0;">Salam <strong style="color:#059669;">' . esc_html( $sponsor_name ) . '</strong>,</p>
+    <p style="font-size:15px;color:#555;line-height:1.7;">Tahniah! Seorang ahli baru telah mendaftar melalui link affiliate anda:</p>
+
+    <div style="background:linear-gradient(135deg,#ecfdf5,#d1fae5);border:1px solid #a7f3d0;border-radius:12px;padding:20px;text-align:center;margin:20px 0;">
+      <p style="margin:0;font-size:14px;color:#065f46;font-weight:600;text-transform:uppercase;letter-spacing:1px;">Ahli Baru</p>
+      <p style="margin:8px 0 0;font-size:22px;font-weight:700;color:#047857;">' . esc_html( $new_member_name ) . '</p>
+    </div>
+
+    <p style="font-size:14px;color:#666;line-height:1.7;">Komisen anda akan dikreditkan setelah transaksi mereka disahkan oleh admin. Log masuk ke dashboard untuk memantau perkembangan anda.</p>
+
+    <div style="text-align:center;margin-top:25px;">
+      <a href="' . esc_url( $dashboard_url ) . '" style="display:inline-block;padding:13px 35px;background:linear-gradient(135deg,#059669,#10b981);color:#fff;border-radius:50px;text-decoration:none;font-weight:700;font-size:15px;">
+        📊 Lihat Dashboard Saya
+      </a>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <div style="background:#1e2328;border-radius:0 0 16px 16px;padding:15px 30px;text-align:center;">
+    <p style="color:#9aa0a9;margin:0;font-size:12px;">© ' . date('Y') . ' ' . esc_html( $site_name ) . '</p>
+  </div>
+</div>
+</body>
+</html>';
     }
 }
